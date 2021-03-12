@@ -23,6 +23,8 @@ import (
 	"os"
 	"runtime"
 	"time"
+	"strings"
+	"regexp"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
@@ -100,6 +102,47 @@ func testConnection() error {
 		}
 	}
 	return nil
+}
+
+// Parse args string i.e. FOO=BAR;ABC=123
+func parseArgs(args string) (map[string]string, error) {
+	m := make(map[string]string)
+
+	items := strings.Split(args, ";")
+	for _, item := range items {
+		kv := strings.Split(item, "=")
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("CNI_ARGS invalid key/value pair: %s\n", kv)
+
+		}
+		m[kv[0]] = kv[1]
+
+	}
+	return m, nil
+}
+
+// Get map of labels to apply to WEPs from args string, e.g. from CALICO_role=prod;CALICO_app=fe;secret=opensesame return map[role:prod app:fe],
+func filterArgs(args string) (map[string]string, error) {
+	calicoArgs := make(map[string]string)
+	mymap, err := parseArgs(args)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to parse args string: %s", args)
+	}
+	for k, v := range mymap {
+		found, err := regexp.MatchString("^CALICO_", k)
+		if err != nil {
+			logrus.Warningf("Failed to parse label key: %s", k)
+			continue
+		}
+		if found {
+			label := strings.TrimPrefix(k, "CALICO_")
+			calicoArgs[label] = v
+			logrus.Infof("Added label %s=%s", label, v)
+			continue
+		}
+		logrus.Debugf("Skipping non-Calico label key: %s", k)
+	}
+	return calicoArgs, nil
 }
 
 func cmdAdd(args *skel.CmdArgs) (err error) {
@@ -365,6 +408,16 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 				} else {
 					labels[k] = v
 				}
+			}
+
+			// Parse and filter labels from CNI_ARGS
+			var cniArgs map[string]string
+			cniArgs, err = filterArgs(args.Args)
+			if err != nil {
+				return
+			}
+			for k, v := range cniArgs {
+				labels[k] = v
 			}
 
 			// 2) Create the endpoint object
